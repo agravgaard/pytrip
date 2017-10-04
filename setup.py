@@ -133,10 +133,18 @@ def get_cmdclass():
 with open('README.rst') as readme_file:
     readme = readme_file.read()
 
+extra_ld = ['']
+if os.name == "posix":
+    extra_flags = ['-fopenmp','-fpic','-march=native', '-O3']
+    extra_ld = ['-lgomp']
+else:
+    extra_flags = ['/openmp','/arch:AVX','/arch:AVX2', '/favor:INTEL64']
+
+
 extensions = [setuptools.Extension(
     'pytriplib',
-    sources=[os.path.join('pytrip', 'lib', 'filter_point.c')],
-    extra_compile_args=['-fpic'])]
+    sources=[os.path.join('pytrip', 'lib', 'filter_point.cpp')],
+    extra_compile_args=extra_flags)]
 
 setuptools.setup(
     name='pytrip98',
