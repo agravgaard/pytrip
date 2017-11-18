@@ -135,7 +135,7 @@ with open('README.rst') as readme_file:
 
 extra_ld = ['']
 if os.name == "posix":
-    extra_flags = ['-fopenmp','-fpic','-march=native', '-O3']
+    extra_flags = ['-fopenmp','-fpic','-march=native', '-O3', '-std=c++17']
     extra_ld = ['-lgomp']
 else:
     extra_flags = ['/openmp','/arch:AVX','/arch:AVX2', '/favor:INTEL64']

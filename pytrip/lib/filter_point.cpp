@@ -1265,18 +1265,32 @@ static PyObject * calculate_lvh_slice(PyObject *self, PyObject *args)
 }
 
 #include <cassert>
+#ifdef _WIN32
 double WEPL_from_point(const std::vector<double> cur_point, const std::array<double, 3> vec_basis,
 	const double vec_cubesize[3], const size_t cubedim[3], float* vec_wepl_cube)
 {
-	const __m256d step = { vec_basis[0], vec_basis[1], vec_basis[2], 0.0 };
+	const __m256d step = _mm256_set_pd(
+                vec_basis[0], 
+                vec_basis[1],
+                vec_basis[2], 0.0 );
 
-	const __m256d cubedim_rev = { (double)cubedim[2], (double)cubedim[1], (double)cubedim[0], 1.0 }; // 2->0 for convienience
-	const __m256d inv_cubesize = { 1.0 / vec_cubesize[0], 1.0 / vec_cubesize[1], 1.0 / vec_cubesize[2], 0.0 };
+	const __m256d cubedim_rev = _mm256_set_pd(
+                static_cast<double>(cubedim[2]), 
+                static_cast<double>(cubedim[1]), 
+                static_cast<double>(cubedim[0]), 1.0 ); 
+                // 2->0 for convienience
+
+	const __m256d inv_cubesize = _mm256_set_pd(
+                1.0 / vec_cubesize[0],
+                1.0 / vec_cubesize[1], 
+                1.0 / vec_cubesize[2], 0.0);
 	const __m256d zeros = _mm256_set1_pd(0.0);
 
-	const __m128i point_id_to_cube_ids = { cubedim[2] * cubedim[1], cubedim[2], 1, 0 };
+	const __m128i point_id_to_cube_ids = _mm_set_epi32( //SSE2 
+                static_cast<int>(cubedim[2] * cubedim[1]),
+                static_cast<double>(cubedim[2]), 1, 0 );
 	assert(point_id_to_cube_ids.m128i_i32[0] == cubedim[2] * cubedim[1]);
-	__m256d point = { cur_point[0], cur_point[1], cur_point[2], 0.0 };
+	__m256d point = _mm256_set_pd(cur_point[0], cur_point[1], cur_point[2], 0.0 );
 
 	double out = 0.0;
 
@@ -1309,6 +1323,65 @@ double WEPL_from_point(const std::vector<double> cur_point, const std::array<dou
 
 	return out;
 }
+#else
+double WEPL_from_point(const std::vector<double> cur_point, const std::array<double, 3> vec_basis,
+	const double vec_cubesize[3], const size_t cubedim[3], float* vec_wepl_cube)
+{
+	const __m256d step = _mm256_set_pd(
+                vec_basis[0], 
+                vec_basis[1],
+                vec_basis[2], 0.0 );
+
+	const __m256d cubedim_rev = _mm256_set_pd(
+                static_cast<double>(cubedim[2]), 
+                static_cast<double>(cubedim[1]), 
+                static_cast<double>(cubedim[0]), 1.0 ); 
+                // 2->0 for convienience
+
+	const __m256d inv_cubesize = _mm256_set_pd(
+                1.0 / vec_cubesize[0],
+                1.0 / vec_cubesize[1], 
+                1.0 / vec_cubesize[2], 0.0);
+	const __m256d zeros = _mm256_set1_pd(0.0);
+
+	const __m128i point_id_to_cube_ids = _mm_set_epi32( //SSE2 
+                static_cast<int>(cubedim[2] * cubedim[1]),
+                static_cast<double>(cubedim[2]), 1, 0 );
+	assert(point_id_to_cube_ids.m128i_i32[0] == cubedim[2] * cubedim[1]);
+	__m256d point = _mm256_set_pd(cur_point[0], cur_point[1], cur_point[2], 0.0 );
+
+	double out = 0.0;
+
+	while (true)
+	{
+		// point_id = point / cube_size
+		const __m256d point_id = _mm256_mul_pd(point, inv_cubesize);
+
+		// point_id < 0.0
+		const __m256d LessThan_Zero = _mm256_cmp_pd(point_id, zeros, _CMP_LT_OQ); // extra variable are optimized away by compiler
+
+		// point_id[0:2] >= cubedim[2:0]
+		const __m256d LargerThan_cdim = _mm256_cmp_pd(point_id, cubedim_rev, _CMP_GE_OQ); // extra variable are optimized away by compiler
+
+		// point_id[0:2] < 0.0 || point_id[0:2] >= cubedim[2:0]
+		const __m256d any_true = _mm256_or_pd(LargerThan_cdim, LessThan_Zero);
+
+		// Break if outside cube
+		if (any_true[0] || any_true[1] || any_true[2]) // 4th element is always False, so if an AVX "OR" instruction returning int exists, it should be used here
+			break;
+
+		// convert point_id to cube_ids
+		const __m128i cube_id = _mm_mul_epi32(_mm256_cvtpd_epi32(point_id), point_id_to_cube_ids);
+
+		out += vec_wepl_cube[(size_t)(cube_id[0] + cube_id[1] + cube_id[2])];
+
+		// point = point - step
+		point = _mm256_sub_pd(point, step);
+	}
+
+	return out;
+}
+#endif
 
 
 static PyObject * calculate_wepl_contour(PyObject *self, PyObject *args)
@@ -1332,21 +1405,21 @@ static PyObject * calculate_wepl_contour(PyObject *self, PyObject *args)
 	double* start = (double *)PyArray_DATA(vec_start);
 
 	int* dimensions = (int *)PyArray_DATA(vec_dimensions);
-	const size_t out_dim[] = {
+	/*const size_t out_dim[] = {
 		(size_t)dimensions[0],
 		(size_t)dimensions[1]
-	};
+	};*/
 
 	double* contour_data = (double *)PyArray_DATA(vec_contour);
 	// vector of vectors of x,y,z:
 	std::vector<std::vector<double>> contour(((int*)len_contour)[0]);
 	int i = { 0 };
 	std::generate(contour.begin(), contour.end(), [&i, &contour_data]() {
-		size_t idx = (size_t)i++;
+		size_t idx = static_cast<size_t>(i++);
 		std::vector<double> point = {
-			contour_data[i * 3],
-			contour_data[i * 3 + 1],
-			contour_data[i * 3 + 2]
+			contour_data[idx * 3],
+			contour_data[idx * 3 + 1],
+			contour_data[idx * 3 + 2]
 		};
 		return point; 
 	});
@@ -1360,13 +1433,19 @@ static PyObject * calculate_wepl_contour(PyObject *self, PyObject *args)
 	vec_out = (PyArrayObject *)PyArray_FromDims(2, dimensions, NPY_DOUBLE);
 	double* out = (double *)PyArray_DATA(vec_out);
 	
-	const std::array<double, 3> basis = { c_basis[0], c_basis[1], c_basis[2] };
+	const std::array<double, 3> basis = {
+                { c_basis[0], c_basis[1], c_basis[2] }
+        };
 
 	// DEFINING A FEW LAMBDAS
 	std::function<std::array<double, 3>(std::vector<double>)>
 		vec_minus = [&basis](std::vector<double> a) 
 	{
-		return std::array<double, 3>{ a[0] - basis[0], a[1] - basis[1], a[2] - basis[2] };
+		return std::array<double, 3>{{
+                        a[0] - basis[0],
+                        a[1] - basis[1],
+                        a[2] - basis[2]
+                }};
 	};
 
 	std::function<bool(std::array<double, 3>, std::vector<std::vector<double>>)>
@@ -1401,7 +1480,11 @@ static PyObject * calculate_wepl_contour(PyObject *self, PyObject *args)
 		// distance from point to plane:
 		const double dist = basis[0] * point[0] + basis[1] * point[1] + basis[2] * point[2] + d;
 		// point in plane(pip) = point - dist*basis
-		std::array<double, 3> pip = { point[0] - dist * basis[0], point[1] - dist * basis[1], point[2] - dist * basis[2] };
+		std::array<double, 3> pip = {{ 
+                        point[0] - dist * basis[0],
+                        point[1] - dist * basis[1],
+                        point[2] - dist * basis[2]
+                }};
 		// idx = length(( pip - origin ) / a), i.e. how many steps of a from origin to point
 		size_t idx = (size_t)sqrt(
 			pow((pip[0] - start[0]) / a[0], 2) +
